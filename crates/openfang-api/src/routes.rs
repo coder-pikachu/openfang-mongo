@@ -639,6 +639,70 @@ pub async fn kill_agent(
     }
 }
 
+/// POST /api/agents/{id}/restart — Restart a crashed/stuck agent.
+///
+/// Cancels any active task, resets agent state to Running, and updates last_active.
+/// Returns the agent's new state.
+pub async fn restart_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Check agent exists
+    let entry = match state.kernel.registry.get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            );
+        }
+    };
+
+    let agent_name = entry.name.clone();
+    let previous_state = format!("{:?}", entry.state);
+    drop(entry);
+
+    // Cancel any running task
+    let was_running = state
+        .kernel
+        .stop_agent_run(agent_id)
+        .unwrap_or(false);
+
+    // Reset state to Running (also updates last_active)
+    let _ = state
+        .kernel
+        .registry
+        .set_state(agent_id, openfang_types::agent::AgentState::Running);
+
+    tracing::info!(
+        agent = %agent_name,
+        previous_state = %previous_state,
+        task_cancelled = was_running,
+        "Agent restarted via API"
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "restarted",
+            "agent": agent_name,
+            "agent_id": id,
+            "previous_state": previous_state,
+            "task_cancelled": was_running,
+        })),
+    )
+}
+
 /// GET /api/status — Kernel status.
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
@@ -1786,18 +1850,23 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
     },
     ChannelMeta {
         name: "feishu", display_name: "Feishu/Lark", icon: "FS",
-        description: "Feishu/Lark Open Platform adapter",
+        description: "Feishu/Lark Open Platform adapter (supports China & International)",
         category: "enterprise", difficulty: "Easy", setup_time: "~3 min",
         quick_setup: "Paste your App ID and App Secret",
         setup_type: "form",
         fields: &[
             ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "cli_abc123", advanced: false },
             ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("FEISHU_APP_SECRET"), required: true, placeholder: "abc123...", advanced: false },
+            ChannelField { key: "region", label: "Region", field_type: FieldType::Text, env_var: None, required: false, placeholder: "cn or intl", advanced: false },
             ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8453", advanced: true },
+            ChannelField { key: "webhook_path", label: "Webhook Path", field_type: FieldType::Text, env_var: None, required: false, placeholder: "/feishu/webhook", advanced: true },
+            ChannelField { key: "verification_token", label: "Verification Token", field_type: FieldType::Text, env_var: None, required: false, placeholder: "verify-token", advanced: true },
+            ChannelField { key: "encrypt_key_env", label: "Encrypt Key", field_type: FieldType::Secret, env_var: Some("FEISHU_ENCRYPT_KEY"), required: false, placeholder: "encrypt-key", advanced: true },
+            ChannelField { key: "bot_names", label: "Bot Names", field_type: FieldType::List, env_var: None, required: false, placeholder: "MyBot, Assistant", advanced: true },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
         ],
-        setup_steps: &["Create an app at open.feishu.cn", "Copy App ID and Secret", "Paste them below"],
-        config_template: "[channels.feishu]\napp_id = \"\"\napp_secret_env = \"FEISHU_APP_SECRET\"",
+        setup_steps: &["Create an app at open.feishu.cn (CN) or open.larksuite.com (International)", "Copy App ID and Secret", "Set region: cn (Feishu) or intl (Lark)"],
+        config_template: "[channels.feishu]\napp_id = \"\"\napp_secret_env = \"FEISHU_APP_SECRET\"\nregion = \"cn\"",
     },
     ChannelMeta {
         name: "dingtalk", display_name: "DingTalk", icon: "DT",
@@ -1813,6 +1882,21 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         ],
         setup_steps: &["Create a robot in your DingTalk group", "Copy the token and signing secret", "Paste them below"],
         config_template: "[channels.dingtalk]\naccess_token_env = \"DINGTALK_ACCESS_TOKEN\"\nsecret_env = \"DINGTALK_SECRET\"",
+    },
+    ChannelMeta {
+        name: "dingtalk_stream", display_name: "DingTalk Stream", icon: "DS",
+        description: "DingTalk Stream Mode (WebSocket long-connection)",
+        category: "enterprise", difficulty: "Easy", setup_time: "~5 min",
+        quick_setup: "Create an Enterprise Internal App with Stream Mode enabled",
+        setup_type: "form",
+        fields: &[
+            ChannelField { key: "app_key_env", label: "App Key", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_KEY"), required: true, placeholder: "ding...", advanced: false },
+            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_SECRET"), required: true, placeholder: "uAn4...", advanced: false },
+            ChannelField { key: "robot_code_env", label: "Robot Code", field_type: FieldType::Text, env_var: Some("DINGTALK_ROBOT_CODE"), required: false, placeholder: "ding... (same as App Key)", advanced: true },
+            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
+        ],
+        setup_steps: &["Create an Enterprise Internal App in DingTalk Open Platform", "Enable Stream Mode in the app settings", "Add robot capability and configure permissions", "Copy App Key and App Secret below"],
+        config_template: "[channels.dingtalk_stream]\napp_key_env = \"DINGTALK_APP_KEY\"\napp_secret_env = \"DINGTALK_APP_SECRET\"",
     },
     ChannelMeta {
         name: "pumble", display_name: "Pumble", icon: "PB",
@@ -2103,6 +2187,7 @@ fn is_channel_configured(config: &openfang_types::config::ChannelsConfig, name: 
         "webex" => config.webex.is_some(),
         "feishu" => config.feishu.is_some(),
         "dingtalk" => config.dingtalk.is_some(),
+        "dingtalk_stream" => config.dingtalk_stream.is_some(),
         "pumble" => config.pumble.is_some(),
         "flock" => config.flock.is_some(),
         "twist" => config.twist.is_some(),
@@ -2225,6 +2310,7 @@ fn channel_config_values(
         "twist" => config.twist.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "mumble" => config.mumble.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config.dingtalk.as_ref().and_then(|c| serde_json::to_value(c).ok()),
+        "dingtalk_stream" => config.dingtalk_stream.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "discourse" => config.discourse.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "gitter" => config.gitter.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "ntfy" => config.ntfy.as_ref().and_then(|c| serde_json::to_value(c).ok()),

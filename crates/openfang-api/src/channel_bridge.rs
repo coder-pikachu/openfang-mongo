@@ -43,6 +43,7 @@ use openfang_channels::webex::WebexAdapter;
 // Wave 5
 use async_trait::async_trait;
 use openfang_channels::dingtalk::DingTalkAdapter;
+use openfang_channels::dingtalk_stream::DingTalkStreamAdapter;
 use openfang_channels::discourse::DiscourseAdapter;
 use openfang_channels::gitter::GitterAdapter;
 use openfang_channels::gotify::GotifyAdapter;
@@ -788,6 +789,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // Wave 5
             "mumble" => channels.mumble.as_ref().map(|c| c.overrides.clone()),
             "dingtalk" => channels.dingtalk.as_ref().map(|c| c.overrides.clone()),
+            "dingtalk_stream" => channels.dingtalk_stream.as_ref().map(|c| c.overrides.clone()),
             "discourse" => channels.discourse.as_ref().map(|c| c.overrides.clone()),
             "gitter" => channels.gitter.as_ref().map(|c| c.overrides.clone()),
             "ntfy" => channels.ntfy.as_ref().map(|c| c.overrides.clone()),
@@ -1093,6 +1095,7 @@ pub async fn start_channel_bridge_with_config(
         // Wave 5
         || config.mumble.is_some()
         || config.dingtalk.is_some()
+        || config.dingtalk_stream.is_some()
         || config.discourse.is_some()
         || config.gitter.is_some()
         || config.ntfy.is_some()
@@ -1150,6 +1153,7 @@ pub async fn start_channel_bridge_with_config(
                     sl_config.allowed_channels.clone(),
                     sl_config.auto_thread_reply,
                     sl_config.thread_ttl_hours,
+                    sl_config.unfurl_links,
                 ));
                 adapters.push((adapter, sl_config.default_agent.clone()));
             }
@@ -1407,10 +1411,21 @@ pub async fn start_channel_bridge_with_config(
     // Feishu/Lark
     if let Some(ref fs_config) = config.feishu {
         if let Some(secret) = read_token(&fs_config.app_secret_env, "Feishu") {
-            let adapter = Arc::new(FeishuAdapter::new(
+            let region =
+                openfang_channels::feishu::FeishuRegion::parse_region(&fs_config.region);
+            let encrypt_key = fs_config
+                .encrypt_key_env
+                .as_ref()
+                .and_then(|env| read_token(env, "Feishu encrypt_key"));
+            let adapter = Arc::new(FeishuAdapter::with_config(
                 fs_config.app_id.clone(),
                 secret,
                 fs_config.webhook_port,
+                region,
+                Some(fs_config.webhook_path.clone()),
+                fs_config.verification_token.clone(),
+                encrypt_key,
+                fs_config.bot_names.clone(),
             ));
             adapters.push((adapter, fs_config.default_agent.clone()));
         }
@@ -1530,12 +1545,24 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // DingTalk
+    // DingTalk (webhook mode)
     if let Some(ref dt_config) = config.dingtalk {
         if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
             let secret = read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
             let adapter = Arc::new(DingTalkAdapter::new(token, secret, dt_config.webhook_port));
             adapters.push((adapter, dt_config.default_agent.clone()));
+        }
+    }
+
+    // DingTalk (stream mode)
+    if let Some(ref ds_config) = config.dingtalk_stream {
+        if let Some(app_key) = read_token(&ds_config.app_key_env, "DingTalk Stream (app_key)") {
+            if let Some(app_secret) = read_token(&ds_config.app_secret_env, "DingTalk Stream (app_secret)") {
+                let robot_code = read_token(&ds_config.robot_code_env, "DingTalk Stream (robot_code)")
+                    .unwrap_or_else(|| app_key.clone());
+                let adapter = Arc::new(DingTalkStreamAdapter::new(app_key, app_secret, robot_code));
+                adapters.push((adapter, ds_config.default_agent.clone()));
+            }
         }
     }
 
@@ -1643,7 +1670,7 @@ pub async fn start_channel_bridge_with_config(
                     "{} default agent: {name} ({agent_id}) [channel: {channel_key}]",
                     adapter.name()
                 );
-                router.set_channel_default(channel_key, agent_id);
+                router.set_channel_default_with_name(channel_key, agent_id, name.clone());
                 // First configured default also becomes system-wide fallback
                 if !system_default_set {
                     router.set_default(agent_id);
