@@ -559,36 +559,49 @@ pub(crate) fn write_jsonl_mirror_impl(
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_parts: Vec<serde_json::Value> = Vec::new();
 
-        match &msg.content {
-            MessageContent::Text(t) => {
-                text_parts.push(t.clone());
-            }
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    match block {
-                        ContentBlock::Text { text, .. } => {
-                            text_parts.push(text.clone());
-                        }
-                        ContentBlock::ToolUse { id, name, input, .. } => {
-                            tool_parts.push(serde_json::json!({
-                                "type": "tool_use",
-                                "id": id,
-                                "name": name,
-                                "input": input,
-                            }));
-                        }
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            tool_name: _,
-                            content,
-                            is_error,
-                        } => {
-                            tool_parts.push(serde_json::json!({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": content,
-                                "is_error": is_error,
-                            }));
+            match &msg.content {
+                MessageContent::Text(t) => {
+                    text_parts.push(t.clone());
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text, .. } => {
+                                text_parts.push(text.clone());
+                            }
+                            ContentBlock::ToolUse {
+                                id, name, input, ..
+                            } => {
+                                tool_parts.push(serde_json::json!({
+                                    "type": "tool_use",
+                                    "id": id,
+                                    "name": name,
+                                    "input": input,
+                                }));
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                tool_name: _,
+                                content,
+                                is_error,
+                            } => {
+                                tool_parts.push(serde_json::json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id,
+                                    "content": content,
+                                    "is_error": is_error,
+                                }));
+                            }
+                            ContentBlock::Image { media_type, .. } => {
+                                text_parts.push(format!("[image: {media_type}]"));
+                            }
+                            ContentBlock::Thinking { thinking } => {
+                                text_parts.push(format!(
+                                    "[thinking: {}]",
+                                    openfang_types::truncate_str(thinking, 200)
+                                ));
+                            }
+                            ContentBlock::Unknown => {}
                         }
                         ContentBlock::Image { media_type, .. } => {
                             text_parts.push(format!("[image: {media_type}]"));
